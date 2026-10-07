@@ -1,0 +1,12 @@
+# Build directories
+build/
+
+# Compiled files
+*.exe
+*.out
+*.o
+*.obj
+
+# Generated debugger files
+resolve.bin
+session.tdbg
