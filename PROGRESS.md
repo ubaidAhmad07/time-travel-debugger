@@ -6,3 +6,7 @@
 # Time : 4:00
 - made the cpp enviroment.
 - implement the custom linked stack.
+
+# Time: 4:33
+- Pass 0x0: Validation done
+- function declearation strucutre validation done.

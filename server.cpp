@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
+#include <sstream>
 using namespace std;
 
 // ---- Constants ----
@@ -43,7 +44,7 @@ class Stack
     Node *top;
     int32_t count;
 
-public:
+    public:
     Stack() : top(nullptr), count(0)
         {
         }
@@ -207,19 +208,109 @@ struct PendingPatch
 // PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream &in, string &out)
 {
-    // reads the next nonblank line
+    while (getline(in, out))
+    {
+        if (out.find_first_not_of(" \t\r\n") != string::npos)
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 string firstWord(const string &line)
 {
-    // returns first word from the input string
+    istringstream input(line);
+    string word;
+    input >> word;
+    return word;
 }
 string secondWord(const string &line)
 {
-    // returns the second word
+    istringstream input(line);
+    string first;
+    string second;
+
+    input >> first >> second;
+    return second;
 }
 bool validateProgram(const char *sourcePath)
 {
-    // for each func defined there should be exactly one func_end and no nested funcs allowed - 
+    ifstream input(sourcePath);
+
+    if (!input)
+    {
+        cerr << "Validation error: cannot open "
+             << sourcePath << '\n';
+        return false;
+    }
+
+    bool insideFunction = false;
+    string activeFunction;
+    string line;
+
+    while (readSourceLine(input, line))
+    {
+        string keyword = firstWord(line);
+
+        // Support full-line comments used in the brief's examples.
+        if (keyword.rfind("//", 0) == 0)
+        {
+            continue;
+        }
+
+        if (keyword == "func")
+        {
+            if (insideFunction)
+            {
+                cerr << "Validation error: nested function inside "
+                     << activeFunction << '\n';
+                return false;
+            }
+
+            string functionName = secondWord(line);
+
+            if (functionName.empty())
+            {
+                cerr << "Validation error: missing function name\n";
+                return false;
+            }
+
+            insideFunction = true;
+            activeFunction = functionName;
+        }
+        else if (keyword == "func_end")
+        {
+            if (!insideFunction)
+            {
+                cerr << "Validation error: unmatched func_end\n";
+                return false;
+            }
+
+            insideFunction = false;
+            activeFunction.clear();
+        }
+        else if (!insideFunction)
+        {
+            cerr << "Validation error: instruction outside a function\n";
+            return false;
+        }
+    }
+
+    if (input.bad())
+    {
+        cerr << "Validation error: failed while reading source\n";
+        return false;
+    }
+
+    if (insideFunction)
+    {
+        cerr << "Validation error: missing func_end for "
+             << activeFunction << '\n';
+        return false;
+    }
+
+    return true;
 }
 
 // PASS 0x1: RESOLVE() -> resolve.bin
