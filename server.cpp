@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <cstdint>
 #include <cstdio>
+#include <stdexcept>
 using namespace std;
 
 // ---- Constants ----
@@ -43,33 +44,83 @@ class Stack
     int32_t count;
 
 public:
-    // Implement these functions:
-    Stack()
-    { // initialize the stack
-    }
-    void push(const T &val)
-    {
+    Stack() : top(nullptr), count(0)
+        {
+        }
 
-        // pushes the value on the stack if max limit is not reached yet.
+    Stack(const Stack&) = delete;
+    Stack& operator=(const Stack&) = delete;
+
+    ~Stack()
+    {
+        while (top != nullptr)
+        {
+            Node* oldTop = top;
+            top = top->next;
+            delete oldTop;
+        }
+    }
+
+    bool isEmpty() const
+    {
+        return top == nullptr;
+    }
+
+    void push(const T& value)
+    {
+        if (count >= 64)
+        {
+            throw std::overflow_error("Stack depth limit reached");
+        }
+
+        Node* newNode = new Node{value, top};
+        top = newNode;
+        ++count;
+    }
+    T& peek()
+    {
+        if (isEmpty())
+        {
+            throw std::underflow_error("Cannot peek at an empty stack");
+        }
+
+        return top->data;
     }
     T pop()
     {
-        // pop the top value on the stack
-    }
-    T &peek()
-    {
-        // returns the top value on the stack
-    }
-    bool isEmpty()
-    {
-    }
+        if (isEmpty())
+        {
+            throw std::underflow_error("Cannot pop an empty stack");
+        }
+
+        T value = top->data;
+        Node* oldTop = top;
+
+        top = oldTop->next;
+        delete oldTop;
+        --count;
+
+        return value;
+    }    
     int32_t depth()
     {
+        return count;
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
         // copies every frame, top to bottom in the array given as a parameter
         // this is what buildSnapshot() call, returns count written
+        Node* current = top;
+        int32_t written = 0;
+
+        while (current != nullptr && written < maxLen)
+        {
+            out[written] = current->data;
+            current = current->next;
+            ++written;
+        }
+
+        return written;
     }
 };
 
