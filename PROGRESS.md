@@ -25,3 +25,9 @@
 - wrote readResolveRecord() with checks for invalid lengths and incomplete reads.
 - last func to implment is left. then this phase is done.
 
+# Time: 9:45
+- implemented binary record handling and function table.
+
+# Time: 9:53
+- resolve and patch function call destinations
+- Pass 0x1: Resolve Done

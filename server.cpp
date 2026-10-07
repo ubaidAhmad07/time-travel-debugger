@@ -405,6 +405,153 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
     // with its target's position. Patching happens after the full write
     // Returns the byte offset of main's FUNC header record.
     // if there is no main return the error 
+    ifstream source(sourcePath);
+
+    if (!source)
+    {
+        throw runtime_error("Cannot open source file");
+    }
+
+    FILE* output = fopen(resolveBinPath, "w+b");
+
+    if (output == nullptr)
+    {
+        throw runtime_error("Cannot open resolve file");
+    }
+
+    FuncEntry funcArray[MAX_FUNCS];
+    int32_t funcCount = 0;
+
+    int64_t mainOffset = -1;
+    string line;
+
+    try
+    {
+        while (getline(source, line))
+        {
+            string keyword = firstWord(line);
+
+            int64_t recordPosition =
+                writeResolveRecord(output, -1, line);
+
+            if (keyword == "func")
+            {
+                string functionName = secondWord(line);
+
+                if (functionName.empty())
+                {
+                    throw runtime_error("Missing function name");
+                }
+
+                if (funcCount >= MAX_FUNCS)
+                {
+                    throw runtime_error("Too many functions");
+                }
+
+                for (int32_t i = 0; i < funcCount; ++i)
+                {
+                    if (funcArray[i].funcName == functionName)
+                    {
+                        throw runtime_error(
+                            "Duplicate function: " + functionName);
+                    }
+                }
+
+                funcArray[funcCount].funcName = functionName;
+
+                funcArray[funcCount].byteOffsetInResolveBin =
+                    recordPosition;
+
+                ++funcCount;
+
+                if (functionName == "main")
+                {
+                    mainOffset = recordPosition;
+                }
+            } else if (keyword == "call")
+            {
+                string targetName = secondWord(line);
+
+                if (targetName.empty())
+                {
+                    throw runtime_error("Missing call target");
+                }
+
+                if (patchCount >= MAX_PATCHES)
+                {
+                    throw runtime_error("Too many calls to resolve");
+                }
+
+                patches[patchCount].byteOffsetOfOffsetField =
+                    recordPosition;
+
+                patches[patchCount].targetFuncName = targetName;
+
+                ++patchCount;
+            }
+        }
+
+        if (source.bad())
+        {
+            throw runtime_error("Cannot finish reading source");
+        }
+
+        if (mainOffset == -1)
+        {
+            throw runtime_error("No main function found");
+        }
+        for (int32_t i = 0; i < patchCount; ++i)
+        {
+            int64_t targetOffset = -1;
+
+            // Find the destination function.
+            for (int32_t j = 0; j < funcCount; ++j)
+            {
+                if (funcArray[j].funcName ==
+                    patches[i].targetFuncName)
+                {
+                    targetOffset =
+                        funcArray[j].byteOffsetInResolveBin;
+
+                    break;
+                }
+            }
+
+            if (targetOffset == -1)
+            {
+                throw runtime_error(
+                    "Undefined function: " +
+                    patches[i].targetFuncName);
+            }
+
+            // Move to the call record's offset field.
+            long patchPosition = static_cast<long>(
+                patches[i].byteOffsetOfOffsetField);
+
+            if (fseek(output, patchPosition, SEEK_SET) != 0)
+            {
+                throw runtime_error("Cannot seek to call record");
+            }
+
+            // Replace only the eight-byte destination field.
+            if (fwrite(&targetOffset, sizeof(int64_t), 1, output) != 1)
+            {
+                throw runtime_error("Cannot patch call destination");
+            }
+        }
+    }
+    catch (...)
+    {
+        fclose(output);
+        throw;
+    }
+
+    if (fclose(output) != 0)
+    {
+        throw runtime_error("Cannot finish writing resolve file");
+    }
+
+    return mainOffset;
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
