@@ -30,6 +30,7 @@ const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the decl
 const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
 const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
 
+
 // ---- Custom data structures
 
 // Stack: back the live Call Stack during execution
@@ -318,10 +319,77 @@ int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
 {
     // writes one [offset(8B)][size(4B)][string] record at the current file position
     // returns this record's own starting byte position
+    if (f == nullptr)
+    {
+        throw runtime_error("Cannot use an unopened file");
+    }
+
+    long recordPosition = ftell(f);
+
+    if (recordPosition == -1L)
+    {
+        throw runtime_error("Cannot get file position");
+    }
+
+    // Assumes the input has passed the project's source-size limit.
+    int32_t textSize = static_cast<int32_t>(text.size());
+
+    if (fwrite(&offsetField, sizeof(int64_t), 1, f) != 1)
+    {
+        throw runtime_error("Cannot write offset");
+    }
+
+    if (fwrite(&textSize, sizeof(int32_t), 1, f) != 1)
+    {
+        throw runtime_error("Cannot write text size");
+    }
+
+    if (fwrite(text.c_str(), 1, textSize, f) !=
+        static_cast<size_t>(textSize))
+    {
+        throw runtime_error("Cannot write text");
+    }
+
+    return recordPosition;
 }
 int64_t readResolveRecord(FILE *f, string &outText)
 {
     // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+    if (f == nullptr)
+    {
+        throw runtime_error("Cannot use an unopened file");
+    }
+
+    int64_t offsetField;
+    int32_t textSize;
+
+    if (fread(&offsetField, sizeof(int64_t), 1, f) != 1)
+    {
+        throw runtime_error("Cannot read offset");
+    }
+
+    if (fread(&textSize, sizeof(int32_t), 1, f) != 1)
+    {
+        throw runtime_error("Cannot read text size");
+    }
+
+    if (textSize < 0 || textSize > MAX_SOURCE_BYTES)
+    {
+        throw runtime_error("Invalid text size");
+    }
+
+    outText.resize(textSize);
+
+    if (textSize > 0)
+    {
+        if (fread(&outText[0], 1, textSize, f) !=
+            static_cast<size_t>(textSize))
+        {
+            throw runtime_error("Cannot read complete text");
+        }
+    }
+
+    return offsetField;
 }
 int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
 {
