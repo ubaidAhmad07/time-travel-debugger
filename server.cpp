@@ -12,8 +12,8 @@
 #include <string>
 #include <cstdint>
 #include <fstream>
-#include <unistd.h>
-#include <sys/socket.h>
+//#include <unistd.h>
+//#include <sys/socket.h> linux only, not needed for Windows
 #include <cstdint>
 #include <cstdio>
 #include <stdexcept>
@@ -374,7 +374,8 @@ int64_t readResolveRecord(FILE *f, string &outText)
         throw runtime_error("Cannot read text size");
     }
 
-    if (textSize < 0 || textSize > MAX_SOURCE_BYTES)
+
+    if (textSize < 0 || static_cast<uint64_t>(textSize) > MAX_SOURCE_BYTES)
     {
         throw runtime_error("Invalid text size");
     }
@@ -420,8 +421,6 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
         throw runtime_error("Cannot open resolve file");
     }
 
-    FuncEntry funcArray[MAX_FUNCS];
-    int32_t funcCount = 0;
 
     int64_t mainOffset = -1;
     string line;
@@ -823,6 +822,7 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
     // implementation:
     // execute line by line, and according to the keyword perform action
        // Snapshot recording is not implemented yet.
+           // Timeline recording will be added next.
     (void)timeline;
 
     if (mainOffset < 0)
@@ -839,7 +839,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 
     try
     {
-        // Move to main's function declaration.
         if (fseek(file, static_cast<long>(mainOffset),
                   SEEK_SET) != 0)
         {
@@ -854,7 +853,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
         int32_t tokenCount =
             tokenizeLine(line, tokens, MAX_TOKENS);
 
-        // This stage supports main without parameters.
         if (tokenCount != 2 ||
             tokens[0].text != "func" ||
             tokens[1].text != "main")
@@ -863,7 +861,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                 "Expected a main function without parameters");
         }
 
-        // Create the live call stack and main's frame.
         Stack<Frame> callStack;
 
         Frame mainFrame{};
@@ -872,23 +869,21 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 
         callStack.push(mainFrame);
 
-        // Execute records until main returns.
         while (!callStack.isEmpty())
         {
-            readResolveRecord(file, line);
+            // For call records, this is the patched destination.
+            int64_t targetOffset =
+                readResolveRecord(file, line);
 
             tokenCount =
                 tokenizeLine(line, tokens, MAX_TOKENS);
 
-            // Skip blank lines and full-line comments.
             if (tokenCount == 0)
             {
                 continue;
             }
 
             string instruction = tokens[0].text;
-
-            // Modify the frame stored inside the stack.
             Frame& activeFrame = callStack.peek();
 
             if (instruction == "set")
@@ -904,6 +899,53 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                 executeArithmetic(
                     activeFrame, tokens, tokenCount);
             }
+            else if (instruction == "call")
+            {
+                if (targetOffset < 0)
+                {
+                    throw runtime_error("Unresolved function call");
+                }
+
+                // Reading the call has advanced to the next record.
+                long returnPosition = ftell(file);
+
+                if (returnPosition == -1L)
+                {
+                    throw runtime_error(
+                        "Cannot get return position");
+                }
+
+                if (fseek(file, static_cast<long>(targetOffset),
+                          SEEK_SET) != 0)
+                {
+                    throw runtime_error(
+                        "Cannot seek to called function");
+                }
+
+                string functionLine;
+                readResolveRecord(file, functionLine);
+
+                // Keep call tokens separate from declaration tokens.
+                Token functionTokens[MAX_TOKENS];
+
+                int32_t functionCount = tokenizeLine(
+                    functionLine, functionTokens, MAX_TOKENS);
+
+                Frame callee = createCallFrame(
+                    activeFrame,
+                    tokens,
+                    tokenCount,
+                    functionTokens,
+                    functionCount,
+                    static_cast<int32_t>(returnPosition));
+
+                callStack.push(callee);
+
+                cout << "Calling "
+                     << callee.func_name << '\n';
+
+                // File position is now after the func declaration.
+            }
             else if (instruction == "func_end")
             {
                 if (tokenCount != 1)
@@ -912,28 +954,43 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                         "func_end takes no arguments");
                 }
 
-                // Temporary output for verifying execution.
-                cout << "Final variables in "
-                     << activeFrame.func_name << ":\n";
-
-                for (int32_t i = 0;
-                     i < activeFrame.localCount;
-                     ++i)
+                // Display main's final state before removing it.
+                if (callStack.depth() == 1)
                 {
-                    cout << activeFrame.locals[i].name
-                         << " = "
-                         << activeFrame.locals[i].value
-                         << '\n';
+                    cout << "Final variables in main:\n";
+
+                    for (int32_t i = 0;
+                         i < activeFrame.localCount;
+                         ++i)
+                    {
+                        cout << activeFrame.locals[i].name
+                             << " = "
+                             << activeFrame.locals[i].value
+                             << '\n';
+                    }
                 }
 
-                callStack.pop();
+                Frame finishedFrame = callStack.pop();
 
-                // Do not use activeFrame after popping.
-            }
-            else if (instruction == "call")
-            {
-                throw runtime_error(
-                    "Function calls are not implemented yet");
+                // activeFrame must not be used after the pop.
+                if (!callStack.isEmpty())
+                {
+                    if (finishedFrame.returnLine < 0)
+                    {
+                        throw runtime_error(
+                            "Invalid return position");
+                    }
+
+                    if (fseek(file, finishedFrame.returnLine,
+                              SEEK_SET) != 0)
+                    {
+                        throw runtime_error(
+                            "Cannot return to caller");
+                    }
+
+                    cout << "Returning to "
+                         << callStack.peek().func_name << '\n';
+                }
             }
             else
             {
@@ -944,7 +1001,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
     }
     catch (...)
     {
-        // Close the file before passing the error to the caller.
         fclose(file);
         throw;
     }
@@ -965,6 +1021,8 @@ void writeTdbg(Timeline &timeline, const char *tdbgPath)
     // update the header
 }
 // main section
+
+
 int32_t main()
 {
 
@@ -983,3 +1041,4 @@ int32_t main()
 
     return 0;
 }
+

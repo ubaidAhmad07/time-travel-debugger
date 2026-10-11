@@ -53,3 +53,8 @@
 # Time 12:40 AM 
 - doing work on raat ke is time :(. so much dedication.
 - parameter binding implentation done.
+
+# Time 1:20 
+- Connected validation, resolution, and execution in a separate check program.
+- Execute function done.
+- Next: implement the doubly linked timeline and record independent execution snapshots.
