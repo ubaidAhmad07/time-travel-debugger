@@ -37,3 +37,8 @@
 - wrote tokenline func which separates an instruction into words.
 - make check of space handling, blank lines, full-line comments, and token capacity.
 - Execution of the tokens remains pending.
+
+# Time 11:40
+- executed set execusion by implementing 3 helper functions, findVaraible, getValue, execute program.
+- now implement , add, sub, mul and div using these same helper funcs.
+

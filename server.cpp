@@ -609,6 +609,81 @@ int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
 
     return count;
 }
+Variable* findVariable(Frame& frame, const string& name)
+{
+    for (int32_t i = 0; i < frame.argc; ++i)
+    {
+        if (frame.argv[i].name == name)
+        {
+            return &frame.argv[i];
+        }
+    }
+
+    for (int32_t i = 0; i < frame.localCount; ++i)
+    {
+        if (frame.locals[i].name == name)
+        {
+            return &frame.locals[i];
+        }
+    }
+
+    return nullptr;
+}
+int32_t getValue(Frame& frame, const string& operand)
+{
+    Variable* variable = findVariable(frame, operand);
+
+    if (variable != nullptr)
+    {
+        return variable->value;
+    }
+
+    istringstream input(operand);
+    int32_t number;
+    char extra;
+
+    if (!(input >> number))
+    {
+        throw runtime_error(
+            "Expected an integer or existing variable: " + operand);
+    }
+
+    if (input >> extra)
+    {
+        throw runtime_error("Invalid integer: " + operand);
+    }
+
+    return number;
+}
+void executeSet(Frame& frame, const Token tokens[], int32_t tokenCount)
+{
+    if (tokenCount != 3 || tokens[0].text != "set")
+    {
+        throw runtime_error("Expected: set variable value");
+    }
+
+    string variableName = tokens[1].text;
+
+    int32_t value = getValue(frame, tokens[2].text);
+
+    Variable* variable = findVariable(frame, variableName);
+
+    if (variable != nullptr)
+    {
+        variable->value = value;
+        return;
+    }
+
+    if (frame.localCount >= MAX_VARS_PER_FRAME)
+    {
+        throw runtime_error("Too many local variables");
+    }
+
+    frame.locals[frame.localCount].name = variableName;
+    frame.locals[frame.localCount].value = value;
+
+    ++frame.localCount;
+}
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
     // build the snapshot based on the callStack given
