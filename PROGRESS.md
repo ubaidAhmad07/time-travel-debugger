@@ -31,3 +31,9 @@
 # Time: 9:53
 - resolve and patch function call destinations
 - Pass 0x1: Resolve Done
+
+# Date 11 Oct 2026
+# Time 11:08
+- wrote tokenline func which separates an instruction into words.
+- make check of space handling, blank lines, full-line comments, and token capacity.
+- Execution of the tokens remains pending.

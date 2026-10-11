@@ -572,6 +572,42 @@ int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
     // instruction set = [func, func_end, call, set, add, sub, mul and div]
     // next word is identifier like name of a function, variable name
     // after identifier all are the params/arg, space separated
+    istringstream input(line);
+    string word;
+    int32_t count = 0;
+
+    while (input >> word)
+    {
+        // Ignore a line comment.
+        if (count == 0 && word.rfind("//", 0) == 0)
+        {
+            return 0;
+        }
+
+        if (count >= maxTokens)
+        {
+            throw runtime_error("Too many tokens in instruction");
+        }
+
+        tokens[count].text = word;
+
+        if (count == 0)
+        {
+            tokens[count].type = KEYWORD;
+        }
+        else if (count == 1)
+        {
+            tokens[count].type = IDENTIFIER;
+        }
+        else
+        {
+            tokens[count].type = PARAM;
+        }
+
+        ++count;
+    }
+
+    return count;
 }
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
