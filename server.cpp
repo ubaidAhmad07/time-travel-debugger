@@ -171,6 +171,7 @@ struct Frame
     int32_t returnLine;
     Variable locals[MAX_VARS_PER_FRAME];
     int32_t localCount;
+    Variable* callerBindings[MAX_VARS_PER_FRAME];
 };
 struct Snapshot
 {
@@ -615,6 +616,11 @@ Variable* findVariable(Frame& frame, const string& name)
     {
         if (frame.argv[i].name == name)
         {
+            if (frame.callerBindings[i] != nullptr)
+            {
+                return frame.callerBindings[i];
+            }
+
             return &frame.argv[i];
         }
     }
@@ -739,6 +745,71 @@ void executeArithmetic(Frame& frame, const Token tokens[], int32_t tokenCount)
 
     destination->value = result;
 }
+Frame createCallFrame(Frame& caller, const Token callTokens[], int32_t callCount, const Token functionTokens[], int32_t functionCount, int32_t returnPosition)
+{
+    if (callCount < 2 || callTokens[0].text != "call")
+    {
+        throw runtime_error("Invalid call instruction");
+    }
+
+    if (functionCount < 2 ||
+        functionTokens[0].text != "func")
+    {
+        throw runtime_error("Call target is not a function");
+    }
+
+    if (callTokens[1].text != functionTokens[1].text)
+    {
+        throw runtime_error("Call target name does not match");
+    }
+
+    int32_t argumentCount = callCount - 2;
+    int32_t parameterCount = functionCount - 2;
+
+    if (argumentCount != parameterCount)
+    {
+        throw runtime_error("Argument count does not match");
+    }
+
+    if (parameterCount > MAX_VARS_PER_FRAME)
+    {
+        throw runtime_error("Too many function parameters");
+    }
+
+    Frame callee{};
+    callee.func_name = functionTokens[1].text;
+    callee.argc = parameterCount;
+    callee.returnLine = returnPosition;
+
+    for (int32_t i = 0; i < parameterCount; ++i)
+    {
+        string parameterName = functionTokens[i + 2].text;
+        string argumentName = callTokens[i + 2].text;
+
+        for (int32_t j = 0; j < i; ++j)
+        {
+            if (callee.argv[j].name == parameterName)
+            {
+                throw runtime_error("Duplicate parameter name");
+            }
+        }
+
+        Variable* argument = findVariable(caller, argumentName);
+
+        if (argument == nullptr)
+        {
+            throw runtime_error(
+                "Call argument must be an existing variable: " +
+                argumentName);
+        }
+
+        callee.argv[i].name = parameterName;
+        callee.argv[i].value = argument->value;
+        callee.callerBindings[i] = argument;
+    }
+
+    return callee;
+}
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
     // build the snapshot based on the callStack given
@@ -751,6 +822,137 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 
     // implementation:
     // execute line by line, and according to the keyword perform action
+       // Snapshot recording is not implemented yet.
+    (void)timeline;
+
+    if (mainOffset < 0)
+    {
+        throw runtime_error("Invalid main offset");
+    }
+
+    FILE* file = fopen(resolveBinPath, "rb");
+
+    if (file == nullptr)
+    {
+        throw runtime_error("Cannot open resolve file");
+    }
+
+    try
+    {
+        // Move to main's function declaration.
+        if (fseek(file, static_cast<long>(mainOffset),
+                  SEEK_SET) != 0)
+        {
+            throw runtime_error("Cannot seek to main");
+        }
+
+        string line;
+        Token tokens[MAX_TOKENS];
+
+        readResolveRecord(file, line);
+
+        int32_t tokenCount =
+            tokenizeLine(line, tokens, MAX_TOKENS);
+
+        // This stage supports main without parameters.
+        if (tokenCount != 2 ||
+            tokens[0].text != "func" ||
+            tokens[1].text != "main")
+        {
+            throw runtime_error(
+                "Expected a main function without parameters");
+        }
+
+        // Create the live call stack and main's frame.
+        Stack<Frame> callStack;
+
+        Frame mainFrame{};
+        mainFrame.func_name = "main";
+        mainFrame.returnLine = -1;
+
+        callStack.push(mainFrame);
+
+        // Execute records until main returns.
+        while (!callStack.isEmpty())
+        {
+            readResolveRecord(file, line);
+
+            tokenCount =
+                tokenizeLine(line, tokens, MAX_TOKENS);
+
+            // Skip blank lines and full-line comments.
+            if (tokenCount == 0)
+            {
+                continue;
+            }
+
+            string instruction = tokens[0].text;
+
+            // Modify the frame stored inside the stack.
+            Frame& activeFrame = callStack.peek();
+
+            if (instruction == "set")
+            {
+                executeSet(
+                    activeFrame, tokens, tokenCount);
+            }
+            else if (instruction == "add" ||
+                     instruction == "sub" ||
+                     instruction == "mul" ||
+                     instruction == "div")
+            {
+                executeArithmetic(
+                    activeFrame, tokens, tokenCount);
+            }
+            else if (instruction == "func_end")
+            {
+                if (tokenCount != 1)
+                {
+                    throw runtime_error(
+                        "func_end takes no arguments");
+                }
+
+                // Temporary output for verifying execution.
+                cout << "Final variables in "
+                     << activeFrame.func_name << ":\n";
+
+                for (int32_t i = 0;
+                     i < activeFrame.localCount;
+                     ++i)
+                {
+                    cout << activeFrame.locals[i].name
+                         << " = "
+                         << activeFrame.locals[i].value
+                         << '\n';
+                }
+
+                callStack.pop();
+
+                // Do not use activeFrame after popping.
+            }
+            else if (instruction == "call")
+            {
+                throw runtime_error(
+                    "Function calls are not implemented yet");
+            }
+            else
+            {
+                throw runtime_error(
+                    "Unexpected instruction: " + instruction);
+            }
+        }
+    }
+    catch (...)
+    {
+        // Close the file before passing the error to the caller.
+        fclose(file);
+        throw;
+    }
+
+    if (fclose(file) != 0)
+    {
+        throw runtime_error("Cannot close resolve file");
+    }
 }
 
 // PASS 0x3: SERIALIZE TIMELINE

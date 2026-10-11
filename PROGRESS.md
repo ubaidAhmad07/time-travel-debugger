@@ -47,3 +47,9 @@
 - Added checks for instruction format, unsupported operations, missing destination variables, and division by zero.
 - Implementation assumption: all arithmetic results fit within the signed 32-bit range. 
 - Next: connect instruction execution to resolve.bin and the call stack.
+
+# Date: 12 Oct 2026
+
+# Time 12:40 AM 
+- doing work on raat ke is time :(. so much dedication.
+- parameter binding implentation done.
