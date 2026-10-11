@@ -684,6 +684,61 @@ void executeSet(Frame& frame, const Token tokens[], int32_t tokenCount)
 
     ++frame.localCount;
 }
+void executeArithmetic(Frame& frame, const Token tokens[], int32_t tokenCount)
+{
+    if (tokenCount != 3)
+    {
+        throw runtime_error("Expected: arithmetic_instruction variable value");
+    }
+
+    string operation = tokens[0].text;
+
+    if (operation != "add" &&
+        operation != "sub" &&
+        operation != "mul" &&
+        operation != "div")
+    {
+        throw runtime_error(
+            "Unknown arithmetic instruction: " + operation);
+    }
+
+    Variable* destination =
+        findVariable(frame, tokens[1].text);
+
+    if (destination == nullptr)
+    {
+        throw runtime_error(
+            "Unknown destination variable: " + tokens[1].text);
+    }
+
+    int32_t left = destination->value;
+    int32_t right = getValue(frame, tokens[2].text);
+    int32_t result = 0;
+
+    if (operation == "add")
+    {
+        result = left + right;
+    }
+    else if (operation == "sub")
+    {
+        result = left - right;
+    }
+    else if (operation == "mul")
+    {
+        result = left * right;
+    }
+    else
+    {
+        if (right == 0)
+        {
+            throw runtime_error("Division by zero");
+        }
+
+        result = left / right;
+    }
+
+    destination->value = result;
+}
 Snapshot *buildSnapshot(Stack<Frame> &callStack)
 {
     // build the snapshot based on the callStack given

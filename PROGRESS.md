@@ -42,3 +42,8 @@
 - executed set execusion by implementing 3 helper functions, findVaraible, getValue, execute program.
 - now implement , add, sub, mul and div using these same helper funcs.
 
+# Time 12:30
+- Implemented add, sub, mul, and div using 32-bit integers.
+- Added checks for instruction format, unsupported operations, missing destination variables, and division by zero.
+- Implementation assumption: all arithmetic results fit within the signed 32-bit range. 
+- Next: connect instruction execution to resolve.bin and the call stack.
