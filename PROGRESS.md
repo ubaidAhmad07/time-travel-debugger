@@ -59,6 +59,9 @@
 - Execute function done.
 - Next: implement the doubly linked timeline and record independent execution snapshots.
 
-# Time 11:14
+# Time 10:44
 - build timeline class
 - next: build snapshot func
+
+# Time 11:18
+- build snapshot func written 0x2 is completed

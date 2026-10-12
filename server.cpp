@@ -853,9 +853,31 @@ Frame createCallFrame(Frame& caller, const Token callTokens[], int32_t callCount
 
     return callee;
 }
-Snapshot *buildSnapshot(Stack<Frame> &callStack)
+Snapshot* buildSnapshot(Stack<Frame>& callStack)
 {
-    // build the snapshot based on the callStack given
+    Snapshot* snapshot = new Snapshot{};
+
+    snapshot->stackDepth = callStack.snapshot_into(
+        snapshot->callStack,
+        MAX_STACK_DEPTH);
+
+    for (int32_t i = 0; i < snapshot->stackDepth; ++i)
+    {
+        Frame& frame = snapshot->callStack[i];
+
+        for (int32_t j = 0; j < frame.argc; ++j)
+        {
+            if (frame.callerBindings[j] != nullptr)
+            {
+                frame.argv[j].value =
+                    frame.callerBindings[j]->value;
+            }
+
+            frame.callerBindings[j] = nullptr;
+        }
+    }
+
+    return snapshot;
 }
 void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &timeline)
 {
