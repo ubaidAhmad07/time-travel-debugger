@@ -65,3 +65,6 @@
 
 # Time 11:18
 - build snapshot func written 0x2 is completed
+
+# Time 11:58
+- 0x3 completed

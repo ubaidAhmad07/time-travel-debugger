@@ -229,12 +229,16 @@ struct TTDBHeader
     int32_t stepCount;
     int64_t indexOffset;
 };
-void writeHeader(FILE *f, const TTDBHeader &h)
+void writeHeader(FILE* file, const TTDBHeader& header)
 {
-    fwrite(h.magic, 1, 4, f);
-    fwrite(&h.version, sizeof(int32_t), 1, f);
+    if (fwrite(header.magic, 1, 4, file) != 4)
+    {
+        throw runtime_error("Cannot write file signature");
+    }
 
-    // placeholder for other two data members
+    writeInt32(file, header.version);
+    writeInt32(file, header.stepCount);
+    writeInt64(file, header.indexOffset);
 }
 
 // resolve.bin - bookkeeping
@@ -889,7 +893,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
     // execute line by line, and according to the keyword perform action
        // Snapshot recording is not implemented yet.
            // Timeline recording will be added next.
-    (void)timeline;
 
     if (mainOffset < 0)
     {
@@ -934,6 +937,8 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
         mainFrame.returnLine = -1;
 
         callStack.push(mainFrame);
+
+        timeline.record(buildSnapshot(callStack));
 
         while (!callStack.isEmpty())
         {
@@ -1063,6 +1068,7 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                 throw runtime_error(
                     "Unexpected instruction: " + instruction);
             }
+            timeline.record(buildSnapshot(callStack));
         }
     }
     catch (...)
@@ -1077,17 +1083,198 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
     }
 }
 
-// PASS 0x3: SERIALIZE TIMELINE
-void writeTdbg(Timeline &timeline, const char *tdbgPath)
+void writeInt32(FILE* file, int32_t value)
 {
-    // placeholder for header
-    // index array of the size of stepcount from the timeline
-    // placing each snapshot in the file while maintaining the index(starting point of each nth snapshot)
-    // after timeline add the index array i the file
-    // update the header
+    if (fwrite(&value, sizeof(int32_t), 1, file) != 1)
+    {
+        throw runtime_error("Cannot write 32-bit integer");
+    }
 }
-// main section
 
+void writeInt64(FILE* file, int64_t value)
+{
+    if (fwrite(&value, sizeof(int64_t), 1, file) != 1)
+    {
+        throw runtime_error("Cannot write 64-bit integer");
+    }
+}
+
+void writeString(FILE* file, const string& text)
+{
+    // Project strings must fit the source-size limit.
+    if (text.size() > MAX_SOURCE_BYTES)
+    {
+        throw runtime_error("String is too long");
+    }
+
+    int32_t length = static_cast<int32_t>(text.size());
+
+    writeInt32(file, length);
+
+    if (fwrite(text.c_str(), 1, text.size(), file) != text.size())
+    {
+        throw runtime_error("Cannot write string");
+    }
+}
+
+void writeSnapshot(FILE* file, const Snapshot& snapshot)
+{
+    if (snapshot.stackDepth < 0 ||
+        snapshot.stackDepth > MAX_STACK_DEPTH)
+    {
+        throw runtime_error("Invalid snapshot depth");
+    }
+
+    writeInt32(file, snapshot.stackDepth);
+
+    for (int32_t i = 0; i < snapshot.stackDepth; ++i)
+    {
+        const Frame& frame = snapshot.callStack[i];
+
+        if (frame.argc < 0 ||
+            frame.argc > MAX_VARS_PER_FRAME ||
+            frame.localCount < 0 ||
+            frame.localCount > MAX_VARS_PER_FRAME)
+        {
+            throw runtime_error("Invalid frame variable count");
+        }
+
+        writeString(file, frame.func_name);
+
+        writeInt32(file, frame.argc);
+
+        for (int32_t j = 0; j < frame.argc; ++j)
+        {
+            writeString(file, frame.argv[j].name);
+            writeInt32(file, frame.argv[j].value);
+        }
+
+        writeInt32(file, frame.returnLine);
+
+        writeInt32(file, frame.localCount);
+
+        for (int32_t j = 0; j < frame.localCount; ++j)
+        {
+            writeString(file, frame.locals[j].name);
+            writeInt32(file, frame.locals[j].value);
+        }
+    }
+}
+
+// PASS 0x3: SERIALIZE TIMELINE
+void writeTdbg(Timeline& timeline, const char* tdbgPath)
+{
+    int32_t stepCount = timeline.getStepCount();
+
+    if (stepCount < 0)
+    {
+        throw runtime_error("Invalid timeline step count");
+    }
+
+    FILE* file = fopen(tdbgPath, "wb");
+
+    if (file == nullptr)
+    {
+        throw runtime_error("Cannot open debugger output file");
+    }
+
+    int64_t* index = nullptr;
+
+    try
+    {
+        TTDBHeader header{};
+        header.magic[0] = 'T';
+        header.magic[1] = 'T';
+        header.magic[2] = 'D';
+        header.magic[3] = 'B';
+
+        header.version = 1;
+        header.stepCount = stepCount;
+
+        // The index position is not known yet.
+        header.indexOffset = 0;
+
+        writeHeader(file, header);
+
+        if (stepCount > 0)
+        {
+            index = new int64_t[stepCount];
+        }
+
+        TimelineNode* current = timeline.begin();
+        int32_t step = 0;
+
+        while (current != nullptr)
+        {
+            if (step >= stepCount)
+            {
+                throw runtime_error("Timeline count mismatch");
+            }
+
+            if (current->data == nullptr)
+            {
+                throw runtime_error("Timeline contains null snapshot");
+            }
+
+            long position = ftell(file);
+
+            if (position == -1L)
+            {
+                throw runtime_error("Cannot get snapshot position");
+            }
+
+            index[step] = position;
+
+            writeSnapshot(file, *current->data);
+
+            current = current->next;
+            ++step;
+        }
+
+        if (step != stepCount)
+        {
+            throw runtime_error("Timeline count mismatch");
+        }
+
+        long indexPosition = ftell(file);
+
+        if (indexPosition == -1L)
+        {
+            throw runtime_error("Cannot get index position");
+        }
+
+        header.indexOffset = indexPosition;
+
+        // Append one destination offset per snapshot.
+        for (int32_t i = 0; i < stepCount; ++i)
+        {
+            writeInt64(file, index[i]);
+        }
+
+        // Rewrite the header with the real index position.
+        if (fseek(file, 0, SEEK_SET) != 0)
+        {
+            throw runtime_error("Cannot return to header");
+        }
+
+        writeHeader(file, header);
+    }
+    catch (...)
+    {
+        delete[] index;
+        fclose(file);
+        throw;
+    }
+
+    delete[] index;
+
+    if (fclose(file) != 0)
+    {
+        throw runtime_error("Cannot finish debugger output file");
+    }
+}
+
+// main section
 
 int32_t main()
 {
