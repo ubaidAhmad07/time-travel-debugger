@@ -58,3 +58,7 @@
 - Connected validation, resolution, and execution in a separate check program.
 - Execute function done.
 - Next: implement the doubly linked timeline and record independent execution snapshots.
+
+# Time 11:14
+- build timeline class
+- next: build snapshot func

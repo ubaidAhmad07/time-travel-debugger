@@ -129,31 +129,75 @@ class Stack
 
 // Timeline : doubly linked list of Snapshots
 struct Snapshot; // fwd declaration;
+
 struct TimelineNode
 {
-    Snapshot *data;
-    TimelineNode *next;
-    TimelineNode *prev;
+    Snapshot* data;
+    TimelineNode* next;
+    TimelineNode* prev;
 };
+
 class Timeline
 {
-    TimelineNode *head, *tail;
+    TimelineNode* head;
+    TimelineNode* tail;
     int32_t stepCount;
 
 public:
-    // Implement these functions
     Timeline()
+        : head(nullptr), tail(nullptr), stepCount(0)
     {
     }
-    void record(Snapshot *s)
+
+    Timeline(const Timeline&) = delete;
+    Timeline& operator=(const Timeline&) = delete;
+
+    ~Timeline()
     {
-        // add record in the timeline
+        TimelineNode* current = head;
+
+        while (current != nullptr)
+        {
+            TimelineNode* nextNode = current->next;
+
+            delete current->data;
+            delete current;
+
+            current = nextNode;
+        }
     }
-    TimelineNode *begin()
+
+    void record(Snapshot* snapshot)
     {
+        if (snapshot == nullptr)
+        {
+            throw runtime_error("Cannot record a null snapshot");
+        }
+
+        TimelineNode* newNode =
+            new TimelineNode{snapshot, nullptr, tail};
+
+        if (head == nullptr)
+        {
+            head = newNode;
+        }
+        else
+        {
+            tail->next = newNode;
+        }
+
+        tail = newNode;
+        ++stepCount;
     }
+
+    TimelineNode* begin()
+    {
+        return head;
+    }
+
     int32_t getStepCount()
     {
+        return stepCount;
     }
 };
 
