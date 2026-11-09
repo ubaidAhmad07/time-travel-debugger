@@ -1,3 +1,5 @@
+#include "ttdb_protocol.h"
+
 // ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
 
 // Pipeline this file implements, top to bottom:
@@ -607,7 +609,7 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
 }
 
 // PASS 0x2: EXECUTION (tokenization happens here)
-enum TokenType
+enum TtdbTokenType
 {
     KEYWORD,
     IDENTIFIER,
@@ -615,7 +617,7 @@ enum TokenType
 };
 struct Token
 {
-    TokenType type;
+    TtdbTokenType type;
     string text;
 };
 int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
@@ -1278,24 +1280,128 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
     }
 }
 
-// main section
-
-int32_t main()
+void runDebugPipeline(const char* sourcePath,
+                      const char* resolvePath,
+                      const char* tdbgPath)
 {
-
-    if (!validateProgram("source.bin"))
+    if (!validateProgram(sourcePath))
     {
-        // send an error response instead of a .tdbg file
-        return 1;
+        throw runtime_error("Invalid source program");
     }
 
-    int64_t mainOffset = resolveProgram("source.bin", "resolve.bin");
+    int64_t mainOffset = resolveProgram(sourcePath, resolvePath);
+    if (mainOffset < 0)
+    {
+        throw runtime_error("Cannot resolve main");
+    }
 
     Timeline timeline;
-    executeProgram("resolve.bin", mainOffset, timeline);
+    executeProgram(resolvePath, mainOffset, timeline);
+    writeTdbg(timeline, tdbgPath);
+}
 
-    writeTdbg(timeline, "session.tdbg");
+void handleUpload(SOCKET client)
+{
+    const char* sourcePath = "network_source.bin";
+    const char* resolvePath = "network_resolve.bin";
+    const char* tdbgPath = "network_session.tdbg";
+    ifstream response;
 
-    return 0;
+    try
+    {
+        ofstream upload(sourcePath, ios::binary);
+        if (!upload)
+        {
+            throw runtime_error("Cannot create source file");
+        }
+
+        unsigned char status =
+            ttdb::receiveMessage(client, upload, MAX_SOURCE_BYTES);
+        upload.close();
+
+        if (!upload)
+        {
+            throw runtime_error("Cannot finish saving source file");
+        }
+        if (status != ttdb::OK)
+        {
+            throw runtime_error("Expected a source upload");
+        }
+
+        runDebugPipeline(sourcePath, resolvePath, tdbgPath);
+        response.open(tdbgPath, ios::binary);
+        if (!response)
+        {
+            throw runtime_error("Cannot open generated debugger file");
+        }
+    }
+    catch (const exception& error)
+    {
+        std::remove(sourcePath);
+        ttdb::sendErrorMessage(client, error.what());
+        return;
+    }
+
+    // A send failure here closes the connection. Never append an error
+    // message to a successful response that has already started.
+    ttdb::sendMessage(client, ttdb::OK, response);
+}
+
+int main(int argc, char* argv[])
+{
+    try
+    {
+        if (argc == 1)
+        {
+            runDebugPipeline("source.bin", "resolve.bin", "session.tdbg");
+            return 0;
+        }
+
+        if (argc != 2)
+        {
+            cerr << "Usage: server.exe [port]\n";
+            return 1;
+        }
+
+        string portText = argv[1];
+        size_t parsed = 0;
+        int port = stoi(portText, &parsed);
+        if (parsed != portText.size() || port < 1 || port > 65535)
+        {
+            throw runtime_error("Invalid server port");
+        }
+
+        ttdb::Winsock winsock;
+        SOCKET listener = ttdb::listenTcp("127.0.0.1", port, 16);
+        cout << "TTDB server listening on 127.0.0.1:"
+             << port << endl;
+
+        while (true)
+        {
+            SOCKET client = accept(listener, nullptr, nullptr);
+            if (client == INVALID_SOCKET)
+            {
+                int code = WSAGetLastError();
+                closesocket(listener);
+                throw ttdb::socketError("accept", code);
+            }
+
+            try
+            {
+                ttdb::setTransferTimeout(client, 30000);
+                handleUpload(client);
+            }
+            catch (const exception& error)
+            {
+                cerr << "Connection error: " << error.what() << '\n';
+            }
+            closesocket(client);
+        }
+    }
+    catch (const exception& error)
+    {
+        cerr << "Server error: " << error.what() << '\n';
+        return 1;
+    }
 }
 
