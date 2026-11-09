@@ -130,6 +130,29 @@ class Stack
 // Timeline : doubly linked list of Snapshots
 struct Snapshot; // fwd declaration;
 
+
+
+// Core structs
+struct Variable
+{
+    string name;
+    int32_t value;
+};
+struct Frame
+{
+    string func_name;
+    int32_t argc;
+    Variable argv[MAX_VARS_PER_FRAME];
+    int32_t returnLine;
+    Variable locals[MAX_VARS_PER_FRAME];
+    int32_t localCount;
+    Variable* callerBindings[MAX_VARS_PER_FRAME];
+};
+struct Snapshot
+{
+    Frame callStack[MAX_STACK_DEPTH];
+    int32_t stackDepth;
+};
 struct TimelineNode
 {
     Snapshot* data;
@@ -200,28 +223,6 @@ public:
         return stepCount;
     }
 };
-
-// Core structs
-struct Variable
-{
-    string name;
-    int32_t value;
-};
-struct Frame
-{
-    string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int32_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-    Variable* callerBindings[MAX_VARS_PER_FRAME];
-};
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-};
 struct TTDBHeader
 {
     char magic[4]; // "TTDB"
@@ -229,6 +230,9 @@ struct TTDBHeader
     int32_t stepCount;
     int64_t indexOffset;
 };
+
+void writeInt32(FILE* file, int32_t value);
+void writeInt64(FILE* file, int64_t value);
 void writeHeader(FILE* file, const TTDBHeader& header)
 {
     if (fwrite(header.magic, 1, 4, file) != 4)
