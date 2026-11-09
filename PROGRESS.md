@@ -68,3 +68,25 @@
 
 # Time 11:58
 - 0x3 completed
+
+## Phase 2  Windows networking
+
+**Date and time:** [9 november 2026]
+
+I was working all day but forgot to commit and add my progress in progress.md, so in night i am making the step by step commit i have done, what i have done till now is written below: 
+
+- Fixed the build of the complete Phase 1 server and verified that the sample ends with `k = 21`.
+- Added Winsock helpers so the project builds natively on Windows with MSYS2.
+- Verified a local TCP request and reply: the client sent `Hello TTDB` and received `OK: Hello TTDB`.
+- Learned how `shutdown(SD_SEND)` tells the receiver that the upload is finished while keeping the connection open for a reply.
+
+
+- Added the message format: one status byte, the payload, and a four-byte CRC-32 trailer.
+- Added a network mode to `server.cpp` that verifies an upload before running the existing Phase 1 pipeline.
+- Added a separate check program to upload source code and save the `.tdbg` reply.
+
+
+- Added the first load balancer implementation. It accepts a client on port `5000` and relays requests to the backend on port `5001`.
+- The balancer checks the checksum in both directions and forwards the trailer only when it matches.
+- **Pending:** Verify the full route on Windows with a valid upload and an upload with a bad checksum.
+- **Next:** Build the interactive client, then add the load balancer’s FIFO queue and automatic backend startup.
