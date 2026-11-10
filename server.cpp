@@ -1,41 +1,14 @@
-#include "ttdb_protocol.h"
-
-// ======================= TIME-TRAVEL DEBUGGER - SERVER TEMPLATE =======================
-
-// Pipeline this file implements, top to bottom:
-//   0. Receive  -- stream the client's .trace bytes straight to source.bin on disk
-//   1. Pass 0X0   -- validity check (FUNC/FUNC_END matching)
-//   2. Pass 0X1   -- resolve(): copy EVERY source line into resolve.bin as [offset][size][string], then patch CALL targets.
-//   3. Pass 0X2   -- execute resolve.bin: tokenize ONE line at a time, update the call stack, take a snapshot -> Timeline
-//   4. Pass 0X3   -- serialize Timeline -> session.tdbg(header + snapshot records + dense index)
-
+#include "helper.h"
 
 #include <iostream>
 #include <string>
-#include <cstdint>
 #include <fstream>
-//#include <unistd.h>
-//#include <sys/socket.h> linux only, not needed for Windows
-#include <cstdint>
+
 #include <cstdio>
 #include <stdexcept>
 #include <sstream>
 using namespace std;
 
-// ---- Constants ----
-const int32_t MAX_VARS_PER_FRAME = 16;
-const int32_t MAX_STACK_DEPTH = 64;
-const int32_t MAX_FUNCS = 128;
-const int32_t MAX_TOKENS = MAX_VARS_PER_FRAME + 2; // kW + func_name + upto 16 params/args
-const int32_t MAX_PATCHES = MAX_FUNCS * 4;
-const uint64_t MAX_SOURCE_BYTES = 15ULL * 1024 * 1024; // sanity cap on the declared file length
-const int32_t IO_BUFFER_SIZE = 64 * 1024;                  // fixed buffer for streaming to/from disk
-const int32_t SOCKET_TIMEOUT_SEC = 5;                      // TODO: apply as SO_RCVTIMEO so a deadclient can't hang the server forever
-
-
-// ---- Custom data structures
-
-// Stack: back the live Call Stack during execution
 template <typename T>
 class Stack
 {
@@ -105,15 +78,14 @@ class Stack
         --count;
 
         return value;
-    }    
+    }
     int32_t depth()
     {
         return count;
     }
     int32_t snapshot_into(T out[], int32_t maxLen)
     {
-        // copies every frame, top to bottom in the array given as a parameter
-        // this is what buildSnapshot() call, returns count written
+
         Node* current = top;
         int32_t written = 0;
 
@@ -128,33 +100,6 @@ class Stack
     }
 };
 
-
-// Timeline : doubly linked list of Snapshots
-struct Snapshot; // fwd declaration;
-
-
-
-// Core structs
-struct Variable
-{
-    string name;
-    int32_t value;
-};
-struct Frame
-{
-    string func_name;
-    int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    int32_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    int32_t localCount;
-    Variable* callerBindings[MAX_VARS_PER_FRAME];
-};
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    int32_t stackDepth;
-};
 struct TimelineNode
 {
     Snapshot* data;
@@ -225,14 +170,6 @@ public:
         return stepCount;
     }
 };
-struct TTDBHeader
-{
-    char magic[4]; // "TTDB"
-    int32_t version;
-    int32_t stepCount;
-    int64_t indexOffset;
-};
-
 void writeInt32(FILE* file, int32_t value);
 void writeInt64(FILE* file, int64_t value);
 void writeHeader(FILE* file, const TTDBHeader& header)
@@ -247,21 +184,6 @@ void writeHeader(FILE* file, const TTDBHeader& header)
     writeInt64(file, header.indexOffset);
 }
 
-// resolve.bin - bookkeeping
-struct FuncEntry
-{
-    string funcName;
-    int64_t byteOffsetInResolveBin; // where this function's FUNC header record sits
-};
-struct PendingPatch
-{
-    int64_t byteOffsetOfOffsetField; // where in resolve.bin to seek back and overwrite
-    string targetFuncName;
-};
-
-
-
-// PASS 0x0: READING source.bin + VALIDITY CHECK
 bool readSourceLine(ifstream &in, string &out)
 {
     while (getline(in, out))
@@ -309,7 +231,6 @@ bool validateProgram(const char *sourcePath)
     {
         string keyword = firstWord(line);
 
-        // Support full-line comments used in the brief's examples.
         if (keyword.rfind("//", 0) == 0)
         {
             continue;
@@ -369,11 +290,9 @@ bool validateProgram(const char *sourcePath)
     return true;
 }
 
-// PASS 0x1: RESOLVE() -> resolve.bin
 int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
 {
-    // writes one [offset(8B)][size(4B)][string] record at the current file position
-    // returns this record's own starting byte position
+
     if (f == nullptr)
     {
         throw runtime_error("Cannot use an unopened file");
@@ -386,7 +305,6 @@ int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
         throw runtime_error("Cannot get file position");
     }
 
-    // Assumes the input has passed the project's source-size limit.
     int32_t textSize = static_cast<int32_t>(text.size());
 
     if (fwrite(&offsetField, sizeof(int64_t), 1, f) != 1)
@@ -409,7 +327,7 @@ int64_t writeResolveRecord(FILE *f, int64_t offsetField, const string &text)
 }
 int64_t readResolveRecord(FILE *f, string &outText)
 {
-    // reads one record at the current position and advances past it, returns the offset field - the raw line text comes back untouched in outText.
+
     if (f == nullptr)
     {
         throw runtime_error("Cannot use an unopened file");
@@ -427,7 +345,6 @@ int64_t readResolveRecord(FILE *f, string &outText)
     {
         throw runtime_error("Cannot read text size");
     }
-
 
     if (textSize < 0 || static_cast<uint64_t>(textSize) > MAX_SOURCE_BYTES)
     {
@@ -453,14 +370,7 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
     int32_t funcCount = 0;
     PendingPatch patches[MAX_PATCHES];
     int32_t patchCount = 0;
-    // Every source line becomes one record holding the raw line, as-is.
-    // resolve() only PEEKS at the leading word(s) -- enough to spot FUNC
-    // (remember its position) and CALL (remember which function it needs
-    // and where its offset field sits).
-    // Once the whole file is written, every CALL's offset field is patched
-    // with its target's position. Patching happens after the full write
-    // Returns the byte offset of main's FUNC header record.
-    // if there is no main return the error 
+
     ifstream source(sourcePath);
 
     if (!source)
@@ -474,7 +384,6 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
     {
         throw runtime_error("Cannot open resolve file");
     }
-
 
     int64_t mainOffset = -1;
     string line;
@@ -558,7 +467,6 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
         {
             int64_t targetOffset = -1;
 
-            // Find the destination function.
             for (int32_t j = 0; j < funcCount; ++j)
             {
                 if (funcArray[j].funcName ==
@@ -578,7 +486,6 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
                     patches[i].targetFuncName);
             }
 
-            // Move to the call record's offset field.
             long patchPosition = static_cast<long>(
                 patches[i].byteOffsetOfOffsetField);
 
@@ -587,7 +494,6 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
                 throw runtime_error("Cannot seek to call record");
             }
 
-            // Replace only the eight-byte destination field.
             if (fwrite(&targetOffset, sizeof(int64_t), 1, output) != 1)
             {
                 throw runtime_error("Cannot patch call destination");
@@ -608,7 +514,6 @@ int64_t resolveProgram(const char *sourcePath, const char *resolveBinPath)
     return mainOffset;
 }
 
-// PASS 0x2: EXECUTION (tokenization happens here)
 enum TtdbTokenType
 {
     KEYWORD,
@@ -622,17 +527,14 @@ struct Token
 };
 int32_t tokenizeLine(const string &line, Token tokens[], int32_t maxTokens)
 {
-    // first word is always a instruction keyword
-    // instruction set = [func, func_end, call, set, add, sub, mul and div]
-    // next word is identifier like name of a function, variable name
-    // after identifier all are the params/arg, space separated
+
     istringstream input(line);
     string word;
     int32_t count = 0;
 
     while (input >> word)
     {
-        // Ignore a line comment.
+
         if (count == 0 && word.rfind("//", 0) == 0)
         {
             return 0;
@@ -891,14 +793,6 @@ Snapshot* buildSnapshot(Stack<Frame>& callStack)
 }
 void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &timeline)
 {
-    // initialize the call stack
-    // make the main frame
-    // push main frame on the call stack
-
-    // implementation:
-    // execute line by line, and according to the keyword perform action
-       // Snapshot recording is not implemented yet.
-           // Timeline recording will be added next.
 
     if (mainOffset < 0)
     {
@@ -948,7 +842,7 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 
         while (!callStack.isEmpty())
         {
-            // For call records, this is the patched destination.
+
             int64_t targetOffset =
                 readResolveRecord(file, line);
 
@@ -983,7 +877,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                     throw runtime_error("Unresolved function call");
                 }
 
-                // Reading the call has advanced to the next record.
                 long returnPosition = ftell(file);
 
                 if (returnPosition == -1L)
@@ -1002,7 +895,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                 string functionLine;
                 readResolveRecord(file, functionLine);
 
-                // Keep call tokens separate from declaration tokens.
                 Token functionTokens[MAX_TOKENS];
 
                 int32_t functionCount = tokenizeLine(
@@ -1021,7 +913,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                 cout << "Calling "
                      << callee.func_name << '\n';
 
-                // File position is now after the func declaration.
             }
             else if (instruction == "func_end")
             {
@@ -1031,7 +922,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
                         "func_end takes no arguments");
                 }
 
-                // Display main's final state before removing it.
                 if (callStack.depth() == 1)
                 {
                     cout << "Final variables in main:\n";
@@ -1049,7 +939,6 @@ void executeProgram(const char *resolveBinPath, int64_t mainOffset, Timeline &ti
 
                 Frame finishedFrame = callStack.pop();
 
-                // activeFrame must not be used after the pop.
                 if (!callStack.isEmpty())
                 {
                     if (finishedFrame.returnLine < 0)
@@ -1107,7 +996,7 @@ void writeInt64(FILE* file, int64_t value)
 
 void writeString(FILE* file, const string& text)
 {
-    // Project strings must fit the source-size limit.
+
     if (text.size() > MAX_SOURCE_BYTES)
     {
         throw runtime_error("String is too long");
@@ -1167,7 +1056,6 @@ void writeSnapshot(FILE* file, const Snapshot& snapshot)
     }
 }
 
-// PASS 0x3: SERIALIZE TIMELINE
 void writeTdbg(Timeline& timeline, const char* tdbgPath)
 {
     int32_t stepCount = timeline.getStepCount();
@@ -1197,7 +1085,6 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
         header.version = 1;
         header.stepCount = stepCount;
 
-        // The index position is not known yet.
         header.indexOffset = 0;
 
         writeHeader(file, header);
@@ -1251,13 +1138,11 @@ void writeTdbg(Timeline& timeline, const char* tdbgPath)
 
         header.indexOffset = indexPosition;
 
-        // Append one destination offset per snapshot.
         for (int32_t i = 0; i < stepCount; ++i)
         {
             writeInt64(file, index[i]);
         }
 
-        // Rewrite the header with the real index position.
         if (fseek(file, 0, SEEK_SET) != 0)
         {
             throw runtime_error("Cannot return to header");
@@ -1285,16 +1170,10 @@ void runDebugPipeline(const char* sourcePath,
                       const char* tdbgPath)
 {
     if (!validateProgram(sourcePath))
-    {
         throw runtime_error("Invalid source program");
-    }
-
     int64_t mainOffset = resolveProgram(sourcePath, resolvePath);
     if (mainOffset < 0)
-    {
         throw runtime_error("Cannot resolve main");
-    }
-
     Timeline timeline;
     executeProgram(resolvePath, mainOffset, timeline);
     writeTdbg(timeline, tdbgPath);
@@ -1302,53 +1181,50 @@ void runDebugPipeline(const char* sourcePath,
 
 void handleUpload(SOCKET client)
 {
-    const char* sourcePath = "network_source.bin";
-    const char* resolvePath = "network_resolve.bin";
-    const char* tdbgPath = "network_session.tdbg";
-    ifstream response;
-
+    FILE* upload = nullptr;
+    FILE* response = nullptr;
     try
     {
-        ofstream upload(sourcePath, ios::binary);
-        if (!upload)
-        {
+        upload = fopen("network_source.bin", "wb");
+        if (upload == nullptr)
             throw runtime_error("Cannot create source file");
-        }
-
-        unsigned char status =
-            ttdb::receiveMessage(client, upload, MAX_SOURCE_BYTES);
-        upload.close();
-
-        if (!upload)
-        {
-            throw runtime_error("Cannot finish saving source file");
-        }
-        if (status != ttdb::OK)
-        {
+        unsigned char status = receiveFile(client, upload, MAX_SOURCE_BYTES);
+        int result = fclose(upload);
+        upload = nullptr;
+        if (result != 0)
+            throw runtime_error("Cannot finish saving source");
+        if (status != 0)
             throw runtime_error("Expected a source upload");
-        }
-
-        runDebugPipeline(sourcePath, resolvePath, tdbgPath);
-        response.open(tdbgPath, ios::binary);
-        if (!response)
-        {
-            throw runtime_error("Cannot open generated debugger file");
-        }
+        runDebugPipeline("network_source.bin", "network_resolve.bin",
+                         "network_session.tdbg");
+        response = fopen("network_session.tdbg", "rb");
+        if (response == nullptr)
+            throw runtime_error("Cannot open debugger file");
     }
     catch (const exception& error)
     {
-        std::remove(sourcePath);
-        ttdb::sendErrorMessage(client, error.what());
+        if (upload != nullptr)
+            fclose(upload);
+        remove("network_source.bin");
+        sendError(client, error.what());
         return;
     }
-
-    // A send failure here closes the connection. Never append an error
-    // message to a successful response that has already started.
-    ttdb::sendMessage(client, ttdb::OK, response);
+    try
+    {
+        sendFile(client, response, 0);
+    }
+    catch (...)
+    {
+        fclose(response);
+        throw;
+    }
+    fclose(response);
 }
 
 int main(int argc, char* argv[])
 {
+    bool socketsStarted = false;
+    SOCKET listener = INVALID_SOCKET;
     try
     {
         if (argc == 1)
@@ -1356,52 +1232,41 @@ int main(int argc, char* argv[])
             runDebugPipeline("source.bin", "resolve.bin", "session.tdbg");
             return 0;
         }
-
         if (argc != 2)
-        {
-            cerr << "Usage: server.exe [port]\n";
-            return 1;
-        }
-
+            throw runtime_error("Usage: server.exe [port]");
         string portText = argv[1];
         size_t parsed = 0;
         int port = stoi(portText, &parsed);
         if (parsed != portText.size() || port < 1 || port > 65535)
-        {
             throw runtime_error("Invalid server port");
-        }
-
-        ttdb::Winsock winsock;
-        SOCKET listener = ttdb::listenTcp("127.0.0.1", port, 16);
-        cout << "TTDB server listening on 127.0.0.1:"
-             << port << endl;
-
+        startWinsock();
+        socketsStarted = true;
+        listener = createListenSocket(port);
+        cout << "TTDB server listening on port " << port << endl;
         while (true)
         {
             SOCKET client = accept(listener, nullptr, nullptr);
             if (client == INVALID_SOCKET)
-            {
-                int code = WSAGetLastError();
-                closesocket(listener);
-                throw ttdb::socketError("accept", code);
-            }
-
+                throw runtime_error("Cannot accept a connection");
             try
             {
-                ttdb::setTransferTimeout(client, 30000);
+                setSocketTimeout(client, 30000);
                 handleUpload(client);
             }
             catch (const exception& error)
             {
-                cerr << "Connection error: " << error.what() << '\n';
+                cerr << error.what() << '\n';
             }
             closesocket(client);
         }
     }
     catch (const exception& error)
     {
-        cerr << "Server error: " << error.what() << '\n';
+        if (listener != INVALID_SOCKET)
+            closesocket(listener);
+        if (socketsStarted)
+            WSACleanup();
+        cerr << error.what() << '\n';
         return 1;
     }
 }
-

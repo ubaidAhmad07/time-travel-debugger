@@ -90,3 +90,13 @@ I was working all day but forgot to commit and add my progress in progress.md, s
 - The balancer checks the checksum in both directions and forwards the trailer only when it matches.
 - **Pending:** Verify the full route on Windows with a valid upload and an upload with a bad checksum.
 - **Next:** Build the interactive client, then add the load balancer’s FIFO queue and automatic backend startup.
+
+**# Date: 10 Nov 2026**
+
+- Write shared structures, constants, socket functions, and checksum handling into helper.h.
+- Write load_balancer.cpp to use a custom linked queue, two threads, one mutex, and time-based queue expiry.
+- Wrote client.cpp functions
+- Added valid and invalid sample inputs and updated the Windows build/run instructions.
+
+**Next**
+- Verify automatic backend startup, valid uploads, navigation, and preservation of the old session after an invalid start.

@@ -1,407 +1,472 @@
-#include "ttdb_protocol.h"
-
-#include <windows.h>
-
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <memory>
-#include <string>
+#include "helper.h"
 #include <vector>
+#include <sstream>
 
-constexpr int MAX_VARS_PER_FRAME = 16;
-constexpr int MAX_STACK_DEPTH = 64;
-constexpr std::int64_t HEADER_SIZE = 20;
-constexpr std::size_t MAX_REPLY_BYTES = 256u * 1024u * 1024u;
-constexpr std::int32_t MAX_NAME_BYTES = 15 * 1024 * 1024;
-
-struct Variable
-{
-    std::string name;
-    std::int32_t value;
-};
-
-struct Frame
-{
-    std::string func_name;
-    std::int32_t argc;
-    Variable argv[MAX_VARS_PER_FRAME];
-    std::int32_t returnLine;
-    Variable locals[MAX_VARS_PER_FRAME];
-    std::int32_t localCount;
-};
-
-struct Snapshot
-{
-    Frame callStack[MAX_STACK_DEPTH];
-    std::int32_t stackDepth;
-};
+string LB_HOST = "127.0.0.1";
+int LB_PORT = 5000;
+const int MAX_JUMP = 1000000000;
 
 struct TdbgReader
 {
-    std::ifstream file;
-    std::int64_t indexOffset = 0;
-    std::vector<std::int64_t> index;
+    FILE* file;
+    TTDBHeader header;
+    vector<int64_t> index;
 };
 
 struct DebugSession
 {
+    bool active;
     TdbgReader reader;
-    std::size_t currentStep = 0;
-    std::filesystem::path downloadedFile;
-
-    ~DebugSession()
-    {
-        if (reader.file.is_open())
-            reader.file.close();
-        if (!downloadedFile.empty())
-        {
-            std::error_code ignored;
-            std::filesystem::remove(downloadedFile, ignored);
-        }
-    }
+    int64_t currentStep;
+    string filePath;
 };
 
-void readBytes(std::ifstream& file, char* destination,
-               std::streamsize size, std::int64_t& remaining)
+void readBytes(FILE* file, void* data, size_t size, int64_t& remaining)
 {
-    if (size < 0 || size > remaining || !file.read(destination, size))
-        throw std::runtime_error("Incomplete .tdbg record");
+    if (size > static_cast<uint64_t>(remaining) ||
+        fread(data, 1, size, file) != size)
+        throw runtime_error("Incomplete debugger record");
     remaining -= size;
 }
 
-template <typename T>
-T readNumber(std::ifstream& file, std::int64_t& remaining)
+int32_t readInt32(FILE* file, int64_t& remaining)
 {
-    // Our Phase 1 Windows writer stores integers in little-endian order.
-    T value{};
-    readBytes(file, reinterpret_cast<char*>(&value), sizeof(value), remaining);
+    int32_t value;
+    readBytes(file, &value, sizeof(value), remaining);
     return value;
 }
 
-std::string readName(std::ifstream& file, std::int64_t& remaining)
+int64_t readInt64(FILE* file, int64_t& remaining)
 {
-    std::int32_t size = readNumber<std::int32_t>(file, remaining);
-    if (size < 0 || size > remaining || size > MAX_NAME_BYTES)
-        throw std::runtime_error("Invalid name length in .tdbg file");
-    std::string name(static_cast<std::size_t>(size), '\0');
-    readBytes(file, name.data(), size, remaining);
-    return name;
+    int64_t value;
+    readBytes(file, &value, sizeof(value), remaining);
+    return value;
 }
 
-int readCount(std::ifstream& file, std::int64_t& remaining, int maximum)
+string readString(FILE* file, int64_t& remaining)
 {
-    int count = readNumber<std::int32_t>(file, remaining);
+    int32_t size = readInt32(file, remaining);
+    if (size < 0 || size > remaining ||
+        static_cast<uint64_t>(size) > MAX_SOURCE_BYTES)
+        throw runtime_error("Invalid debugger string length");
+    string text(size, '\0');
+    if (size > 0)
+        readBytes(file, &text[0], size, remaining);
+    return text;
+}
+
+int32_t readCount(FILE* file, int64_t& remaining, int maximum)
+{
+    int32_t count = readInt32(file, remaining);
     if (count < 0 || count > maximum)
-        throw std::runtime_error("Invalid count in .tdbg file");
+        throw runtime_error("Invalid debugger count");
     return count;
 }
 
-void readSnapshotAt(TdbgReader& reader, std::size_t step, Snapshot& snapshot)
+void closeTdbg(TdbgReader& reader)
 {
-    if (step >= reader.index.size())
-        throw std::runtime_error("Step is outside the session");
-
-    std::int64_t start = reader.index[step];
-    std::int64_t end = step + 1 < reader.index.size()
-        ? reader.index[step + 1] : reader.indexOffset;
-    std::int64_t remaining = end - start;
-    std::ifstream& file = reader.file;
-    file.clear();
-    if (!file.seekg(start))
-        throw std::runtime_error("Cannot seek to snapshot");
-
-    snapshot.stackDepth = readCount(file, remaining, MAX_STACK_DEPTH);
-    for (int i = 0; i < snapshot.stackDepth; ++i)
-    {
-        Frame& frame = snapshot.callStack[i];
-        frame.func_name = readName(file, remaining);
-        frame.argc = readCount(file, remaining, MAX_VARS_PER_FRAME);
-        for (int j = 0; j < frame.argc; ++j)
-        {
-            frame.argv[j].name = readName(file, remaining);
-            frame.argv[j].value = readNumber<std::int32_t>(file, remaining);
-        }
-        frame.returnLine = readNumber<std::int32_t>(file, remaining);
-        frame.localCount = readCount(file, remaining, MAX_VARS_PER_FRAME);
-        for (int j = 0; j < frame.localCount; ++j)
-        {
-            frame.locals[j].name = readName(file, remaining);
-            frame.locals[j].value = readNumber<std::int32_t>(file, remaining);
-        }
-    }
-    if (remaining != 0)
-        throw std::runtime_error("Snapshot does not match its index boundary");
+    if (reader.file != nullptr)
+        fclose(reader.file);
+    reader.file = nullptr;
+    reader.index.clear();
 }
 
-void openTdbg(const std::filesystem::path& path, TdbgReader& reader)
+Snapshot* readSnapshotAt(TdbgReader& reader, int32_t step)
 {
-    std::ifstream& file = reader.file;
-    file.open(path, std::ios::binary | std::ios::ate);
-    if (!file)
-        throw std::runtime_error("Cannot open .tdbg file");
-    std::int64_t fileSize = file.tellg();
-    if (fileSize < HEADER_SIZE || !file.seekg(0))
-        throw std::runtime_error("Invalid .tdbg file size");
+    if (reader.file == nullptr || step < 0 ||
+        step >= reader.header.stepCount)
+        return nullptr;
 
-    std::int64_t headerRemaining = HEADER_SIZE;
-    char magic[4];
-    readBytes(file, magic, sizeof(magic), headerRemaining);
-    int version = readNumber<std::int32_t>(file, headerRemaining);
-    std::int32_t steps = readNumber<std::int32_t>(file, headerRemaining);
-    reader.indexOffset = readNumber<std::int64_t>(file, headerRemaining);
-
-    if (std::string(magic, sizeof(magic)) != "TTDB" || version != 1)
-        throw std::runtime_error("Unsupported .tdbg signature or version");
-
-    if (steps < 1 || reader.indexOffset < HEADER_SIZE ||
-        reader.indexOffset > fileSize ||
-        fileSize - reader.indexOffset != 8LL * steps ||
-        reader.indexOffset - HEADER_SIZE < 4LL * steps)
-        throw std::runtime_error("Invalid .tdbg index");
-
-    if (!file.seekg(reader.indexOffset))
-        throw std::runtime_error("Cannot seek to .tdbg index");
-    std::int64_t indexRemaining = fileSize - reader.indexOffset;
-    reader.index.reserve(steps);
-    for (int i = 0; i < steps; ++i)
+    Snapshot* snapshot = nullptr;
+    try
     {
-        std::int64_t offset = readNumber<std::int64_t>(file, indexRemaining);
-        if ((i == 0 && offset != HEADER_SIZE) ||
-            (i > 0 && offset <= reader.index.back()) ||
-            offset >= reader.indexOffset)
-            throw std::runtime_error("Invalid snapshot offset");
-        reader.index.push_back(offset);
-    }
+        int64_t start = reader.index[step];
+        int64_t end = step + 1 < reader.header.stepCount
+            ? reader.index[step + 1] : reader.header.indexOffset;
+        int64_t remaining = end - start;
+        if (remaining < 4 ||
+            fseek(reader.file, static_cast<long>(start), SEEK_SET) != 0)
+            throw runtime_error("Invalid snapshot boundary");
 
-    // Validate every record before a new session can replace the old one.
-    Snapshot snapshot{};
-    for (std::size_t i = 0; i < reader.index.size(); ++i)
-        readSnapshotAt(reader, i, snapshot);
+        snapshot = new Snapshot{};
+        snapshot->stackDepth =
+            readCount(reader.file, remaining, MAX_STACK_DEPTH);
+        for (int i = 0; i < snapshot->stackDepth; ++i)
+        {
+            Frame& frame = snapshot->callStack[i];
+            frame.func_name = readString(reader.file, remaining);
+            frame.argc = readCount(reader.file, remaining, MAX_VARS_PER_FRAME);
+            for (int j = 0; j < frame.argc; ++j)
+            {
+                frame.argv[j].name = readString(reader.file, remaining);
+                frame.argv[j].value = readInt32(reader.file, remaining);
+            }
+            frame.returnLine = readInt32(reader.file, remaining);
+            frame.localCount =
+                readCount(reader.file, remaining, MAX_VARS_PER_FRAME);
+            for (int j = 0; j < frame.localCount; ++j)
+            {
+                frame.locals[j].name = readString(reader.file, remaining);
+                frame.locals[j].value = readInt32(reader.file, remaining);
+            }
+        }
+        if (remaining != 0)
+            throw runtime_error("Snapshot does not match its index");
+        return snapshot;
+    }
+    catch (const exception&)
+    {
+        delete snapshot;
+        return nullptr;
+    }
 }
 
-void showStep(DebugSession& session, std::size_t step)
+bool openTdbg(const char* path, TdbgReader& reader)
 {
-    Snapshot snapshot{};
-    readSnapshotAt(session.reader, step, snapshot);
-    session.currentStep = step;
+    reader.file = fopen(path, "rb");
+    if (reader.file == nullptr)
+        return false;
 
-    std::cout << "Step " << step + 1 << '/' << session.reader.index.size()
-              << " | stack depth: " << snapshot.stackDepth << '\n';
+    try
+    {
+        if (fseek(reader.file, 0, SEEK_END) != 0)
+            throw runtime_error("Cannot read debugger size");
+        long fileSize = ftell(reader.file);
+        if (fileSize < 20 || fseek(reader.file, 0, SEEK_SET) != 0)
+            throw runtime_error("Invalid debugger size");
+
+        int64_t remaining = 20;
+        readBytes(reader.file, reader.header.magic, 4, remaining);
+        reader.header.version = readInt32(reader.file, remaining);
+        reader.header.stepCount = readInt32(reader.file, remaining);
+        reader.header.indexOffset = readInt64(reader.file, remaining);
+
+        if (string(reader.header.magic, 4) != "TTDB" ||
+            reader.header.version != 1)
+            throw runtime_error("Invalid debugger header");
+        int32_t steps = reader.header.stepCount;
+        int64_t indexOffset = reader.header.indexOffset;
+        if (steps < 1 || indexOffset < 20 || indexOffset > fileSize ||
+            fileSize - indexOffset != 8LL * steps ||
+            indexOffset - 20 < 4LL * steps)
+            throw runtime_error("Invalid debugger index");
+
+        if (fseek(reader.file, static_cast<long>(indexOffset), SEEK_SET) != 0)
+            throw runtime_error("Cannot read debugger index");
+        remaining = fileSize - indexOffset;
+        reader.index.resize(steps);
+        for (int i = 0; i < steps; ++i)
+        {
+            int64_t offset = readInt64(reader.file, remaining);
+            if ((i == 0 && offset != 20) ||
+                (i > 0 && offset <= reader.index[i - 1]) ||
+                offset >= indexOffset)
+                throw runtime_error("Invalid snapshot offset");
+            reader.index[i] = offset;
+        }
+        for (int i = 0; i < steps; ++i)
+        {
+            Snapshot* snapshot = readSnapshotAt(reader, i);
+            if (snapshot == nullptr)
+                throw runtime_error("Invalid snapshot data");
+            delete snapshot;
+        }
+        return true;
+    }
+    catch (const exception&)
+    {
+        closeTdbg(reader);
+        return false;
+    }
+}
+
+void initSession(DebugSession& session)
+{
+    session.active = false;
+    session.reader.file = nullptr;
+    session.reader.header = {};
+    session.reader.index.clear();
+    session.currentStep = 0;
+    session.filePath.clear();
+}
+
+void closeSession(DebugSession& session)
+{
+    closeTdbg(session.reader);
+    session.active = false;
+    session.currentStep = 0;
+}
+
+void printSnapshot(int32_t step, int32_t totalSteps, const Snapshot& snapshot)
+{
+    cout << "Step " << step + 1 << '/' << totalSteps
+         << " | stack depth: " << snapshot.stackDepth << '\n';
     if (snapshot.stackDepth == 0)
-        std::cout << "Call stack is empty.\n";
+        cout << "Call stack is empty.\n";
     for (int i = 0; i < snapshot.stackDepth; ++i)
     {
         const Frame& frame = snapshot.callStack[i];
-        std::cout << "  " << frame.func_name << '\n';
+        cout << "  " << frame.func_name << '\n';
         for (int j = 0; j < frame.argc; ++j)
-            std::cout << "    parameter " << frame.argv[j].name
-                      << " = " << frame.argv[j].value << '\n';
+            cout << "    parameter " << frame.argv[j].name
+                 << " = " << frame.argv[j].value << '\n';
         for (int j = 0; j < frame.localCount; ++j)
-            std::cout << "    local " << frame.locals[j].name
-                      << " = " << frame.locals[j].value << '\n';
+            cout << "    local " << frame.locals[j].name
+                 << " = " << frame.locals[j].value << '\n';
     }
 }
 
-std::filesystem::path makeTemporaryFile()
+bool showCurrent(DebugSession& session)
 {
-    std::filesystem::path folder = std::filesystem::temp_directory_path();
-    wchar_t path[MAX_PATH];
-    if (GetTempFileNameW(folder.c_str(), L"ttd", 0, path) == 0)
-        throw std::runtime_error("Cannot create a temporary download file");
-    return std::filesystem::path(path);
+    if (!session.active)
+    {
+        cout << "No active session. Use start <source path>.\n";
+        return false;
+    }
+    Snapshot* snapshot = readSnapshotAt(
+        session.reader, static_cast<int32_t>(session.currentStep));
+    if (snapshot == nullptr)
+    {
+        cout << "Damaged .tdbg file.\n";
+        return false;
+    }
+    printSnapshot(static_cast<int32_t>(session.currentStep),
+                  session.reader.header.stepCount, *snapshot);
+    delete snapshot;
+    return true;
 }
 
-unsigned char downloadSession(const char* host, int port,
-                              const std::filesystem::path& sourcePath,
-                              const std::filesystem::path& downloadPath)
+bool moveBy(DebugSession& session, int32_t delta)
 {
-    std::ifstream source(sourcePath, std::ios::binary);
-    if (!source)
-        throw std::runtime_error("Cannot open source file: " + sourcePath.string());
-    std::ofstream reply(downloadPath, std::ios::binary);
-    if (!reply)
-        throw std::runtime_error("Cannot open temporary download");
+    if (!session.active)
+        return showCurrent(session);
+    int64_t target = session.currentStep + delta;
+    if (target < 0 || target >= session.reader.header.stepCount)
+    {
+        cout << "Jump is outside the session.\n";
+        return false;
+    }
+    int64_t previous = session.currentStep;
+    session.currentStep = target;
+    if (!showCurrent(session))
+    {
+        session.currentStep = previous;
+        return false;
+    }
+    return true;
+}
 
-    SOCKET socket = ttdb::connectTcp(host, port);
+bool requestDebugFile(const char* sourcePath, const char* outputPath,
+                      string& outError)
+{
+    FILE* source = nullptr;
+    FILE* output = nullptr;
+    SOCKET sock = INVALID_SOCKET;
     try
     {
-        ttdb::setTransferTimeout(socket, 30000);
-        ttdb::sendMessage(socket, ttdb::OK, source);
-        unsigned char status = ttdb::receiveMessage(socket, reply, MAX_REPLY_BYTES);
-        reply.close();
-        if (!reply)
-            throw std::runtime_error("Cannot finish writing download");
-        closesocket(socket);
-        return status;
+        source = fopen(sourcePath, "rb");
+        if (source == nullptr)
+            throw runtime_error("Cannot open source file");
+        output = fopen(outputPath, "wb");
+        if (output == nullptr)
+            throw runtime_error("Cannot open download file");
+        sock = connectToHost(LB_HOST.c_str(), LB_PORT);
+        setSocketTimeout(sock, 30000);
+        sendFile(sock, source, 0);
+        fclose(source);
+        source = nullptr;
+        unsigned char status = receiveFile(sock, output, 0);
+        int result = fclose(output);
+        output = nullptr;
+        closesocket(sock);
+        sock = INVALID_SOCKET;
+        if (result != 0)
+            throw runtime_error("Cannot finish saving download");
+        if (status == 1)
+        {
+            output = fopen(outputPath, "rb");
+            if (output == nullptr)
+                throw runtime_error("Cannot read server error");
+            char text[4096];
+            size_t count = fread(text, 1, sizeof(text), output);
+            outError.assign(text, count);
+            fclose(output);
+            output = nullptr;
+            remove(outputPath);
+            return false;
+        }
+        return true;
     }
-    catch (...)
+    catch (const exception& error)
     {
-        closesocket(socket);
-        throw;
+        if (source != nullptr)
+            fclose(source);
+        if (output != nullptr)
+            fclose(output);
+        if (sock != INVALID_SOCKET)
+            closesocket(sock);
+        remove(outputPath);
+        outError = error.what();
+        return false;
     }
 }
 
-void startSession(std::unique_ptr<DebugSession>& active, const char* host,
-                  int port, const std::filesystem::path& source)
+bool cmdStart(DebugSession& session, const string& sourcePath)
 {
-    auto candidate = std::make_unique<DebugSession>();
-    candidate->downloadedFile = makeTemporaryFile();
-    unsigned char status = downloadSession(host, port, source, candidate->downloadedFile);
-    if (status == ttdb::ERROR_REPLY)
+    string prefix = "ttdb_" + to_string(GetCurrentProcessId());
+    string firstPath = prefix + "_a.tdbg";
+    string secondPath = prefix + "_b.tdbg";
+    string newPath = session.filePath == firstPath ? secondPath : firstPath;
+    string error;
+    if (!requestDebugFile(sourcePath.c_str(), newPath.c_str(), error))
     {
-        std::ifstream reply(candidate->downloadedFile, std::ios::binary);
-        char text[4096];
-        reply.read(text, sizeof(text));
-        throw std::runtime_error(
-            "Server error: " + std::string(text, static_cast<std::size_t>(reply.gcount())));
+        cout << error << '\n';
+        return false;
     }
 
-    try
+    TdbgReader candidate{};
+    if (!openTdbg(newPath.c_str(), candidate))
     {
-        openTdbg(candidate->downloadedFile, candidate->reader);
-    }
-    catch (const std::exception& error)
-    {
-        throw std::runtime_error(
-            std::string("Server sent a damaged .tdbg file: ") + error.what());
+        remove(newPath.c_str());
+        cout << "Server sent a damaged .tdbg file.\n";
+        return false;
     }
 
-    showStep(*candidate, 0);
-    // Only now release the old reader and its downloaded file.
-    active = std::move(candidate);
+    string previousPath = session.filePath;
+    closeSession(session);
+    session.reader.file = candidate.file;
+    session.reader.header = candidate.header;
+    session.reader.index.swap(candidate.index);
+    candidate.file = nullptr;
+    session.filePath = newPath;
+    session.currentStep = 0;
+    session.active = true;
+    if (!previousPath.empty())
+        remove(previousPath.c_str());
+    return showCurrent(session);
 }
 
-void moveBy(const std::unique_ptr<DebugSession>& active, std::int64_t delta)
-{
-    if (!active)
-        throw std::runtime_error("No active session. Use start <source path>.");
-    std::int64_t step = static_cast<std::int64_t>(active->currentStep) + delta;
-    if (step < 0 || step >= static_cast<std::int64_t>(active->reader.index.size()))
-        throw std::runtime_error("Jump is outside the session");
-    showStep(*active, static_cast<std::size_t>(step));
-}
+bool cmdNext(DebugSession& session) { return moveBy(session, 1); }
+bool cmdPrv(DebugSession& session) { return moveBy(session, -1); }
+bool cmdJmpNext(DebugSession& session, int32_t n) { return moveBy(session, n); }
+bool cmdJmpPrv(DebugSession& session, int32_t n) { return moveBy(session, -n); }
 
 void printHelp()
 {
-    std::cout << "start <source path> | next | prv | jmp next <n> | "
-                 "jmp prv <n> | help | quit\n";
+    cout << "start <source path> | next | prv | jmp next <n> | "
+            "jmp prv <n> | help | quit\n";
 }
 
-bool runCommand(std::unique_ptr<DebugSession>& active,
-                const char* host, int port, const std::string& line)
+bool runCommand(DebugSession& session, const string& line, bool& quitRequested)
 {
-    std::istringstream input(line);
-    std::string command;
+    istringstream input(line);
+    string command;
     if (!(input >> command))
         return true;
     if (command == "ttdb")
         input >> command;
-
     if (command == "start")
     {
-        if (host == nullptr)
-            throw std::runtime_error("start is unavailable in offline mode");
-        std::string path;
-        std::getline(input >> std::ws, path);
-        auto last = path.find_last_not_of(" \t\r");
-        if (last != std::string::npos)
+        string path;
+        getline(input >> ws, path);
+        size_t last = path.find_last_not_of(" \t\r");
+        if (last != string::npos)
             path.erase(last + 1);
         if (path.size() >= 2 && path.front() == '"' && path.back() == '"')
             path = path.substr(1, path.size() - 2);
         if (path.empty())
-            throw std::runtime_error("Usage: start <source path>");
-        startSession(active, host, port, path);
-        return true;
+        {
+            cout << "Usage: start <source path>\n";
+            return false;
+        }
+        return cmdStart(session, path);
     }
-
-    std::string extra;
+    string extra;
     if (command == "jmp")
     {
-        std::string direction;
-        std::int64_t count;
+        string direction;
+        int64_t count;
         if (!(input >> direction >> count) || (input >> extra) ||
-            (direction != "next" && direction != "prv") ||
-            count <= 0 || count > 1000000000)
-            throw std::runtime_error("Usage: jmp next <n> or jmp prv <n>");
-        moveBy(active, direction == "next" ? count : -count);
-        return true;
-    }
-
-    if (!(input >> extra))
-    {
-        if (command == "quit" || command == "exit")
-            return false;
-        if (command == "next")
-            moveBy(active, 1);
-        else if (command == "prv")
-            moveBy(active, -1);
-        else if (command == "help")
-            printHelp();
-        else
+            count <= 0 || count > MAX_JUMP)
         {
-            std::cout << "Unknown command.\n";
             printHelp();
+            return false;
         }
+        if (direction == "next")
+            return cmdJmpNext(session, static_cast<int32_t>(count));
+        if (direction == "prv")
+            return cmdJmpPrv(session, static_cast<int32_t>(count));
+        printHelp();
+        return false;
+    }
+    if (input >> extra)
+    {
+        printHelp();
+        return false;
+    }
+    if (command == "next")
+        return cmdNext(session);
+    if (command == "prv")
+        return cmdPrv(session);
+    if (command == "help")
+    {
+        printHelp();
         return true;
     }
-
-    throw std::runtime_error("Unexpected arguments. Type help.");
+    if (command == "quit" || command == "exit")
+    {
+        quitRequested = true;
+        return true;
+    }
+    cout << "Unknown command.\n";
+    printHelp();
+    return false;
 }
 
 int main(int argc, char* argv[])
 {
     if (argc != 3)
     {
-        std::cerr << "Usage: client.exe <lb_ip> <lb_port>\n"
-                     "       client.exe --inspect <file.tdbg>\n";
+        cerr << "Usage: client.exe <lb_ip> <lb_port>\n";
         return 1;
     }
-
+    bool socketsStarted = false;
+    DebugSession session;
+    initSession(session);
     try
     {
-        std::unique_ptr<ttdb::Winsock> winsock;
-        std::unique_ptr<DebugSession> active;
-        const char* host = nullptr;
-        int port = 0;
-
-        if (std::string(argv[1]) == "--inspect")
-        {
-            active = std::make_unique<DebugSession>();
-            openTdbg(argv[2], active->reader);
-            showStep(*active, 0);
-        }
-        else
-        {
-            host = argv[1];
-            std::string portText = argv[2];
-            std::size_t parsed = 0;
-            port = std::stoi(portText, &parsed);
-            if (parsed != portText.size())
-                throw std::runtime_error("Invalid load balancer port");
-            winsock = std::make_unique<ttdb::Winsock>();
-            ttdb::ipv4Address(host, port);
-        }
-
+        LB_HOST = argv[1];
+        string portText = argv[2];
+        size_t parsed = 0;
+        LB_PORT = stoi(portText, &parsed);
+        if (parsed != portText.size() || LB_PORT < 1 || LB_PORT > 65535)
+            throw runtime_error("Invalid load balancer port");
+        startWinsock();
+        socketsStarted = true;
         printHelp();
-        std::string line;
-        while (std::cout << "ttdb> " && std::getline(std::cin, line))
+        bool quitRequested = false;
+        string line;
+        while (!quitRequested && cout << "ttdb> " && getline(cin, line))
         {
             try
             {
-                if (!runCommand(active, host, port, line))
-                    break;
+                runCommand(session, line, quitRequested);
             }
-            catch (const std::exception& error)
+            catch (const exception& error)
             {
-                std::cerr << error.what() << '\n';
+                cout << error.what() << '\n';
             }
         }
+        closeSession(session);
+        WSACleanup();
         return 0;
     }
-    catch (const std::exception& error)
+    catch (const exception& error)
     {
-        std::cerr << "Client error: " << error.what() << '\n';
+        closeSession(session);
+        if (socketsStarted)
+            WSACleanup();
+        cerr << error.what() << '\n';
         return 1;
     }
 }

@@ -1,15 +1,10 @@
-# Build directories
-build/
-
-# Compiled files
+work/
 *.exe
-*.out
 *.o
 *.obj
-
-# Generated debugger files
+ttdb_*.tdbg
+network_source.bin
+network_resolve.bin
+network_session.tdbg
 resolve.bin
 session.tdbg
-
-# Temporary practice files
-work/
